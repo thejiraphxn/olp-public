@@ -1,0 +1,123 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: olp
+      POSTGRES_PASSWORD: olp
+      POSTGRES_DB: olp
+    ports: ["5432:5432"]
+    volumes: ["olp_pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U olp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_API_CORS_ALLOW_ORIGIN: "http://localhost:3000,http://127.0.0.1:3000"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    # Bind mount onto the host so you can `ls` / play mp4s directly
+    # without going through `docker exec`. Default path is "./data"
+    # next to this compose file. On macOS Docker Desktop this works
+    # via VirtioFS — slower than a native FS but fine for dev.
+    # Override for an external disk:
+    #   OLP_DATA_DIR=/Volumes/Backup/olp docker compose up -d minio
+    volumes:
+      - ${OLP_DATA_DIR:-./data}/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Optional self-hosted Whisper — OpenAI-compatible ASR API. Start with:
+  #   docker compose --profile whisper up -d
+  # then set WHISPER_API_BASE_URL=http://whisper:8000/v1 in the worker env.
+  whisper:
+    profiles: ["whisper"]
+    image: fedirz/faster-whisper-server:latest-cpu
+    environment:
+      WHISPER__MODEL: Systran/faster-whisper-small
+      WHISPER__COMPUTE_TYPE: int8
+    ports: ["8000:8000"]
+    volumes:
+      - whisper_cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb -p local/olp-recordings || true;
+      mc anonymous set download local/olp-recordings || true;
+      echo 'MinIO bucket ready';
+      exit 0;
+      "
+
+  # --- App services (only started with `--profile app`) ---
+  api:
+    profiles: ["app"]
+    build:
+      context: ./backend
+    environment:
+      DATABASE_URL: postgresql://olp:olp@postgres:5432/olp
+      PORT: 4000
+      # CORS_ORIGIN is only needed if the browser talks to the API directly.
+      # With the Next.js proxy this is same-origin so CORS does not kick in.
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+      S3_ENDPOINT: http://minio:9000
+      PUBLIC_S3_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: olp-recordings
+      S3_FORCE_PATH_STYLE: "true"
+      NODE_ENV: production
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    # The `api` port is exposed for dev/debug only. In prod behind a single
+    # domain, you can remove this line so the API is reachable only via the
+    # Next.js proxy — that keeps everything on one origin.
+    ports: ["4000:4000"]
+    restart: unless-stopped
+
+  # NOTE: the api container embeds the Postgres-backed TaskWorker in-process
+  # (EMBED_WORKER default = true). For horizontal scaling, run a second api
+  # instance with EMBED_WORKER=false and a third with HTTP disabled — both
+  # workers will safely claim tasks via FOR UPDATE SKIP LOCKED.
+
+  web:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      # Baked into the JS bundle — keep relative for same-origin proxy.
+      args:
+        NEXT_PUBLIC_API_BASE: /api/v1
+    environment:
+      NEXT_PUBLIC_API_BASE: /api/v1
+      # Internal URL the Next.js server uses to forward /api + /socket.io
+      # to the API container. Never reaches the browser.
+      BACKEND_URL: http://api:4000
+      NODE_ENV: production
+    depends_on: [api]
+    ports: ["3000:3000"]
+    restart: unless-stopped
+
+volumes:
+  olp_pg: {}
+  whisper_cache: {}

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm exec *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(grep -A 12 \"^model Course$\" \"/Users/jiraphonieotrakoon/iCloud Drive \\(Archive\\) - 3/Documents/AllWebProject/online-education/backend/prisma/schema.prisma\")"
+    ]
+  }
+}

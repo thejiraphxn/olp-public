@@ -1,0 +1,32 @@
+{
+  "name": "online-education",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:reset": "docker compose down -v && docker compose up -d",
+    "backend:dev": "pnpm --filter olp-backend dev",
+    "backend:worker": "pnpm --filter olp-backend worker",
+    "backend:seed": "pnpm --filter olp-backend seed",
+    "backend:migrate": "pnpm --filter olp-backend prisma migrate dev",
+    "backend:studio": "pnpm --filter olp-backend prisma studio",
+    "frontend:dev": "pnpm --filter olp-frontend dev",
+    "setup": "pnpm install && pnpm backend:migrate && pnpm backend:seed"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "ffmpeg-static",
+      "bcrypt",
+      "bcryptjs",
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@10.33.1+sha512.05ba3c1d5d1c18f68df06470d74055e62d41fc110a0c660db1b2dfb2785327f04cf0f68345d4609bc52089e7fa0343c31593b2f9594e2c5d5da426230acc9820"
+}

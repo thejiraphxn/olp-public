@@ -1,0 +1,23 @@
+# Pinned for reproducibility — bump deliberately when upgrading.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+faster-whisper==1.1.1
+# CTranslate2 ships inside faster-whisper. Pin it loosely to avoid
+# breaking changes between minor releases.
+ctranslate2>=4.4.0,<5
+# Pulled in transitively by huggingface_hub (model downloads), but pinning
+# explicitly so test scripts and operators can rely on it.
+requests>=2.31,<3
+
+# --- Phase 2: Python owns transcribe + summarize ---
+# Direct Postgres access so the server can write transcripts/summaries
+# without bouncing through the Node API.
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.29.0
+# Outbound HTTP to the LLM provider (Ollama Cloud / Groq / etc.).
+httpx==0.27.2
+python-dotenv==1.0.1
+# S3 client — used by the pull-mode handoff to fetch mp3 directly from
+# MinIO instead of having Node upload it in the request body.
+boto3==1.35.36

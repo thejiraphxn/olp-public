@@ -1,0 +1,268 @@
+generator client {
+  provider      = "prisma-client-js"
+  // `native` for local dev (macOS/Linux), `debian-openssl-3.0.x` for the
+  // Render runner (node:20-bookworm-slim ships OpenSSL 3).
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CourseRole {
+  TEACHER
+  STUDENT
+}
+
+enum CourseVisibility {
+  PRIVATE
+  PUBLIC
+}
+
+enum SessionStatus {
+  DRAFT
+  SCHEDULED
+  LIVE
+  ENDED
+}
+
+enum RecordingStatus {
+  PENDING
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+}
+
+// Type discriminator for Task. Single-value for now — there's only one
+// long-running pipeline. Adding new types later means new handlers in
+// infrastructure/tasks/handlers.
+enum TaskType {
+  RECORDING_PIPELINE
+}
+
+// Lifecycle of a Task row, in roughly the order it transitions through
+// for a successful recording pipeline. The Node worker drives stages
+// from CLAIMED through HANDED_OFF; the Python whisper-server drives
+// TRANSCRIBING and SUMMARIZING. Either side can flip to FAILED on error.
+enum TaskStatus {
+  PENDING
+  CLAIMED
+  TRANSCODING
+  EXTRACTING_AUDIO
+  UPLOADING_AUDIO
+  THUMBNAIL
+  HANDED_OFF
+  TRANSCRIBING
+  SUMMARIZING
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+model User {
+  id                String               @id @default(cuid())
+  email             String               @unique
+  name              String
+  passwordHash      String
+  isDemo            Boolean              @default(false)
+  demoBlurb         String? // one-line description shown on the demo login page
+  createdAt         DateTime             @default(now())
+  memberships       CourseMember[]
+  ownedCourses      Course[]             @relation("CourseOwner")
+  progress          SessionProgress[]
+  questionsAsked    SessionQuestion[]    @relation("AskedBy")
+  questionsAnswered SessionQuestion[]    @relation("AnsweredBy")
+  chatMessages      SessionChatMessage[]
+  attendance        SessionAttendance[]
+
+  @@index([isDemo])
+}
+
+model Course {
+  id          String           @id @default(cuid())
+  code        String           @unique
+  title       String
+  description String?
+  coverColor  String? // hex color for the card cover; null → pick from palette on FE
+  joinCode    String           @unique
+  visibility  CourseVisibility @default(PRIVATE)
+  ownerId     String
+  owner       User             @relation("CourseOwner", fields: [ownerId], references: [id])
+  createdAt   DateTime         @default(now())
+  members     CourseMember[]
+  sessions    CourseSession[]
+
+  @@index([ownerId])
+  @@index([visibility])
+}
+
+model CourseMember {
+  id       String     @id @default(cuid())
+  courseId String
+  userId   String
+  role     CourseRole
+  joinedAt DateTime   @default(now())
+  course   Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, userId])
+  @@index([userId])
+}
+
+model CourseSession {
+  id          String               @id @default(cuid())
+  courseId    String
+  course      Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  scheduledAt DateTime?
+  status      SessionStatus        @default(DRAFT)
+  startedAt   DateTime?
+  endedAt     DateTime?
+  // Optional 6-digit numeric access code. NULL = anyone with course access
+  // can enter; non-null = students/guests must type the code before viewing
+  // playback or joining the live room. Stored in plaintext on purpose —
+  // it's a soft gate, not a security boundary.
+  accessCode  String?              @db.VarChar(6)
+  recording   SessionRecording?
+  progress    SessionProgress[]
+  questions   SessionQuestion[]
+  chats       SessionChatMessage[]
+  attendance  SessionAttendance[]
+  createdAt   DateTime             @default(now())
+
+  @@index([courseId, scheduledAt])
+}
+
+model SessionQuestion {
+  id               String        @id @default(cuid())
+  sessionId        String
+  // Nullable so guests (anonymous viewers on PUBLIC courses) can ask
+  // questions without a User row. When null, `askedGuestName` carries
+  // the display name from the guest token.
+  askedByUserId    String?
+  askedGuestName   String?
+  text             String
+  answeredAt       DateTime?
+  answeredByUserId String?
+  answerText       String?
+  createdAt        DateTime      @default(now())
+  session          CourseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  askedBy          User?         @relation("AskedBy", fields: [askedByUserId], references: [id])
+  answeredBy       User?         @relation("AnsweredBy", fields: [answeredByUserId], references: [id])
+
+  @@index([sessionId, createdAt])
+}
+
+model SessionChatMessage {
+  id                 String        @id @default(cuid())
+  sessionId          String
+  // Nullable — guest tokens have no matching User row. When null,
+  // `guestName` carries the display name from the JWT.
+  userId             String?
+  guestName          String?
+  text               String
+  attachmentKey      String?
+  attachmentName     String?
+  attachmentMimeType String?
+  attachmentSize     Int?
+  createdAt          DateTime      @default(now())
+  session            CourseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user               User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+}
+
+model SessionProgress {
+  id          String        @id @default(cuid())
+  userId      String
+  sessionId   String
+  positionSec Int           @default(0)
+  completed   Boolean       @default(false)
+  updatedAt   DateTime      @updatedAt
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session     CourseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sessionId])
+  @@index([userId, updatedAt])
+}
+
+// One row per "stint" a user spent in a live session. A user who leaves and
+// rejoins produces multiple rows — total time is the sum of (leftAt - joinedAt)
+// across them. `leftAt` is null only while the socket is still connected.
+//
+// Guests (anonymous viewers on PUBLIC courses) have userId=null and a
+// `guestName` snapshot from their guest JWT. Indexed separately so the
+// teacher's roster aggregation can group guests by name without scanning.
+model SessionAttendance {
+  id        String        @id @default(cuid())
+  sessionId String
+  // Nullable so guest stints can be recorded without a User FK.
+  userId    String?
+  // Guest display name snapshot — only set when userId is null.
+  guestName String?
+  joinedAt  DateTime      @default(now())
+  leftAt    DateTime?
+  session   CourseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user      User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, userId])
+  @@index([sessionId, joinedAt])
+}
+
+model SessionRecording {
+  id           String          @id @default(cuid())
+  sessionId    String          @unique
+  session      CourseSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  status       RecordingStatus @default(PENDING)
+  uploadId     String?
+  s3UploadId   String?
+  rawKey       String?
+  playbackKey  String?
+  audioKey     String? // mp3 download path (set by extract-audio stage)
+  thumbnailKey String?
+  chapters     Json? // [{ timeSec: number, label: string }] — teacher-authored
+  autoChapters Json? // [{ timeSec: number, label: string }] — LLM-generated fallback
+  transcript   Json? // [{ startSec: number, endSec: number, text: string }]
+  summary      String? // teacher-authored manual override (preferred when present)
+  autoSummary  String? // LLM-generated fallback (shown with an "AI-generated" badge)
+  durationSec  Int?
+  sizeBytes    BigInt?
+  errorMessage String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  tasks        Task[]
+}
+
+// Postgres-backed task queue. Replaces BullMQ/Redis. Worker polls with
+// `SELECT … FOR UPDATE SKIP LOCKED` to claim. lockedUntil acts as a
+// lease — if the worker crashes, the lock auto-expires and another
+// worker picks the row up.
+model Task {
+  id           String            @id @default(cuid())
+  type         TaskType
+  status       TaskStatus        @default(PENDING)
+  recordingId  String?
+  recording    SessionRecording? @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  payload      Json? // arbitrary handler input — kept generic so we don't bloat the row
+  attempts     Int               @default(0)
+  maxAttempts  Int               @default(3)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  errorMessage String?
+  // Append-only audit log for the task. JSONB array of
+  //   { ts: ISOString, level: 'info'|'warn'|'error', stage: string, message: string }
+  // Cap at ~200 entries — older entries are dropped from the head when
+  // appending (keeps row size bounded).
+  logs         Json              @default("[]")
+  lockedBy     String? // worker id (host:pid:randomSuffix)
+  lockedUntil  DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([status, lockedUntil])
+  @@index([recordingId])
+  @@index([createdAt])
+}

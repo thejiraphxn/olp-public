@@ -1,0 +1,29 @@
+name: Keep Render awake
+
+# Render Free spins the web service down after ~15 min of inactivity and
+# cold-start takes 30–60s, which breaks the live classroom + BullMQ worker.
+# Hitting /ping every 10 min keeps the container warm.
+#
+# Setup (one-time):
+#   Repo Settings → Secrets and variables → Actions → New repository secret
+#     Name:  RENDER_PING_URL
+#     Value: https://olp-api-xxxx.onrender.com/ping
+#
+# GitHub cron can drift or skip runs under load, so a missed tick is fine —
+# the next one (~10 min later) will catch it before Render spins down.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # manual trigger for testing
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping backend
+        run: |
+          curl --fail --silent --show-error --max-time 60 \
+            --retry 3 --retry-delay 5 --retry-connrefused \
+            "${{ secrets.RENDER_PING_URL }}"

@@ -1,0 +1,148 @@
+# Production deploy on a single VPS, behind the host Nginx on port 443.
+# All services bind 127.0.0.1 only — Nginx is the public entrypoint.
+#
+# Usage:
+#   cp .env.production.example .env.production
+#   # edit secrets
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-olp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-olp}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes: ["olp_pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-olp}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    # Bind mount onto the host so operators can browse / back up / inspect
+    # mp4s without going through `docker exec`. Default `${OLP_DATA_DIR}`
+    # is "./data" (relative to compose), but on prod we set it to an
+    # absolute path like /opt/live-stream/data via .env.production.
+    # `user:` makes the in-container minio process write as the host's
+    # uid:gid so files on disk are owned by the operator, not root.
+    volumes:
+      - ${OLP_DATA_DIR:-./data}/minio:/data
+    user: "${OLP_DATA_UID:-1000}:${OLP_DATA_GID:-1000}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      BUCKET: ${S3_BUCKET:-olp-recordings}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb -p "local/$$BUCKET" || true
+        echo "MinIO bucket $$BUCKET ready"
+
+  api:
+    build:
+      context: ./backend
+    # Lets the api container reach the host's localhost — used to call the
+    # standalone Whisper FastAPI server (running outside docker, on :8000).
+    # Set WHISPER_API_BASE_URL=http://host.docker.internal:8000/v1 in
+    # .env.production to use it. Cloud Whisper providers don't need this.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-olp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-olp}
+      PORT: 4000
+      NODE_ENV: production
+      LOG_LEVEL: info
+      EMBED_WORKER: "true"
+      SEED_ON_BOOT: ${SEED_ON_BOOT:-true}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: 7d
+      # Same-origin proxy via Next.js — CORS won't actually trigger, set for safety.
+      CORS_ORIGIN: https://trsonline.mithat.co.th
+      COOKIE_SECURE: "true"
+      COOKIE_SAMESITE: lax
+      # S3 — internal endpoint for the API, public endpoint for browser presigned URLs.
+      S3_ENDPOINT: http://minio:9000
+      PUBLIC_S3_ENDPOINT: https://trsonline.mithat.co.th
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-olp-recordings}
+      S3_FORCE_PATH_STYLE: "true"
+      # External whisper-server (Phase 2 — Python owns transcribe + LLM).
+      # The API only needs to know how to reach the server; LLM_* env vars
+      # belong to whisper-server now and are NOT set here.
+      WHISPER_API_KEY: ${WHISPER_API_KEY}
+      WHISPER_API_BASE_URL: ${WHISPER_API_BASE_URL:-http://host.docker.internal:8000/v1}
+      # Hand-off timeout — short, since we only wait for HTTP 202 from
+      # the whisper-server before Python takes over.
+      WHISPER_HANDOFF_TIMEOUT_MS: ${WHISPER_HANDOFF_TIMEOUT_MS:-60000}
+      FFMPEG_PRESET: ${FFMPEG_PRESET:-veryfast}
+      FFMPEG_CRF: ${FFMPEG_CRF:-23}
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    # Expose api on the host loopback so the host nginx can route /socket.io/
+    # straight to it. Avoids the double-hop through Next.js standalone, whose
+    # WebSocket rewrite is unreliable for sustained connections.
+    ports:
+      - "127.0.0.1:4000:4000"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the JS bundle at build time — same-origin proxy.
+        NEXT_PUBLIC_API_BASE: /api/v1
+        # Empty = same-origin. Override in .env.production with your full
+        # https URL (e.g. NEXT_PUBLIC_SOCKET_URL=https://your-domain) when
+        # the same-origin Socket.IO upgrade through Next.js rewrites is
+        # flaky — pointing the browser straight at the host nginx (which
+        # proxies /socket.io directly to web:3000) fixes most live-class
+        # connectivity issues at the cost of one extra cookie hop.
+        NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-}
+        # Next.js bakes rewrites() into required-server-files.json at build
+        # time, so BACKEND_URL must be present here — runtime env is too late.
+        BACKEND_URL: http://api:4000
+    environment:
+      NEXT_PUBLIC_API_BASE: /api/v1
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-}
+      BACKEND_URL: http://api:4000
+      NODE_ENV: production
+    depends_on: [api]
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+volumes:
+  # Postgres still uses a named volume — its files aren't useful to
+  # browse on disk, and bind-mounting them would expose the lock-file
+  # ownership quirks (postgres needs uid 70 on alpine).
+  olp_pg: {}

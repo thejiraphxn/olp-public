@@ -1,0 +1,12 @@
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.python-version
+# faster-whisper downloads model weights here when WHISPER_MODEL_CACHE is local
+models/
+.cache/
+models/

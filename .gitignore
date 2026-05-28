@@ -1,0 +1,18 @@
+node_modules/
+.env
+.env.local
+.env.production
+.env.prod
+.next/
+dist/
+*.log
+.DS_Store
+backups/
+data/
+
+# Whisper model files (multi-GB, fetched on first run)
+whisper-server/models/
+whisper-server/models--*/
+whisper-server/venv/
+whisper-server/__pycache__/
+whisper-server/*.log
