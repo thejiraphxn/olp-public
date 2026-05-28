@@ -2,68 +2,70 @@
 
 Session-based teaching platform with browser screen+audio recording and later playback.
 
-แผนสถาปัตยกรรม + roadmap ฉบับเต็ม: **[TECHNICAL-PLAN.md](./TECHNICAL-PLAN.md)**
+Full architecture & roadmap: **[TECHNICAL-PLAN.md](./TECHNICAL-PLAN.md)**
 
 ---
 
-## โครงสร้างโปรเจกต์
+## Project structure
 
 ```
 online-education/
-├── TECHNICAL-PLAN.md       # เอกสารวางแผน 12 หัวข้อ
+├── TECHNICAL-PLAN.md       # 12-section planning document
 ├── docker-compose.yml      # postgres + redis + minio (S3-compatible)
 ├── backend/                # Node.js + Express + Prisma + BullMQ + FFmpeg
-└── frontend/               # Next.js 14 (App Router) + Tailwind
+├── frontend/               # Next.js 14 (App Router) + Tailwind
+└── whisper-server/         # Python FastAPI + faster-whisper (transcription + LLM)
 ```
 
 ---
 
 ## Prerequisites
 
-| Tool            | ใช้ทำอะไร                                 |
+| Tool            | Purpose                                    |
 |-----------------|--------------------------------------------|
-| Node.js ≥ 20    | รัน backend + frontend                     |
-| pnpm            | package manager                            |
-| Docker Desktop  | รัน Postgres + Redis + MinIO               |
+| Node.js ≥ 20    | Run backend + frontend                     |
+| pnpm            | Package manager                            |
+| Docker Desktop  | Run Postgres + Redis + MinIO               |
+| Python ≥ 3.12   | Run whisper-server (optional)              |
 
-ติดตั้ง pnpm ถ้ายังไม่มี:
+Install pnpm if you don't have it:
 ```bash
 npm install -g pnpm
 ```
 
 ---
 
-## วิธี run (ครั้งแรก)
+## First-time setup
 
 ### 1. Start infra — Postgres, Redis, MinIO
 
-เปิด Docker Desktop ให้ running ก่อน แล้ว:
+Make sure Docker Desktop is running, then:
 
 ```bash
-cd "/Users/jiraphonieotrakoon/iCloud Drive (Archive) - 3/Documents/AllWebProject/online-education"
+cd /path/to/online-education
 docker compose up -d
 docker compose ps
 ```
 
-ควรเห็น 3 services (postgres, redis, minio) สถานะ `running` — พร้อมกับ `minio-init` ที่สร้าง bucket `olp-recordings` เสร็จแล้ว exit
+You should see 3 services (postgres, redis, minio) in the `running` state, along with `minio-init` which creates the `olp-recordings` bucket and exits.
 
-**หน้า console ที่ใช้เช็ค:**
+**Consoles for checking:**
 - MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`)
-- Postgres: `localhost:5432` (user `olp`, pw `olp`, db `olp`)
+- Postgres: `localhost:5432` (user `olp`, password `olp`, db `olp`)
 - Redis: `localhost:6379`
 
-### 2. Setup backend
+### 2. Set up backend
 
 ```bash
 cd backend
 cp .env.example .env
 pnpm install
 pnpm prisma generate
-pnpm prisma migrate dev --name init   # สร้าง schema ใน Postgres
-pnpm seed                              # ใส่ demo users + courses + sessions
+pnpm prisma migrate dev --name init   # create schema in Postgres
+pnpm seed                              # insert demo users + courses + sessions
 ```
 
-### 3. Setup frontend
+### 3. Set up frontend
 
 ```bash
 cd ../frontend
@@ -73,23 +75,25 @@ pnpm install
 
 ---
 
-## ⚠️ ถ้าเคย setup ไปแล้ว — ต้อง run migration เพิ่ม
+## ⚠️ If you've already set up before — run additional migrations
 
-schema เปลี่ยนหลายรอบ (thumbnail+chapters, progress, questions, chat, **joinCode, visibility, chat attachments, transcript**). รันครั้งเดียวก็พอ:
+The schema has changed several times (thumbnail+chapters, progress, questions, chat, **joinCode, visibility, chat attachments, transcript**). Run once:
 
 ```bash
 cd backend
 pnpm install
 pnpm prisma migrate dev --name add-join-code-visibility-attachments-transcript
-pnpm seed   # สร้าง joinCode ให้ course ที่ seed ไว้
+pnpm seed   # adds joinCode to seeded courses
 
 cd ../frontend
 pnpm install
 ```
 
+---
+
 ## Whisper transcription (audio → text)
 
-**Phase 2:** Whisper รันเป็น Python FastAPI server แยก (ไม่ใช้ cloud) — `whisper-server/` ในโปรเจคนี้ Python เป็นคนเรียก LLM เอง + เขียน transcript/summary ลง Postgres ตรงๆ Node API แค่ส่งไฟล์ mp3 + task_id ไปแล้วได้ HTTP 202 กลับ
+**Phase 2:** Whisper runs as a separate Python FastAPI server (no cloud) — `whisper-server/` in this project. Python calls the LLM itself and writes transcript/summary directly to Postgres. The Node API just hands off the mp3 + task_id and receives HTTP 202 in return.
 
 Pipeline:
 ```
@@ -101,14 +105,14 @@ recording.mp4 → extract mp3 → POST /v1/tasks (whisper-server) → 202
                                           └─ write Postgres (transcript + summary)
 ```
 
-Setup whisper-server (one-time, ดู `whisper-server/README.md` ละเอียด):
+Set up whisper-server (one-time, see `whisper-server/README.md` for details):
 
 ```bash
 cd whisper-server
 python3.12 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# แก้ .env: ใส่ LLM_API_URL/LLM_API_KEY/LLM_MODEL (สำหรับ summary)
+# Edit .env: set LLM_API_URL / LLM_API_KEY / LLM_MODEL (for summaries)
 python server.py
 # server listening on :8000
 ```
@@ -116,40 +120,42 @@ python server.py
 Backend `.env`:
 
 ```bash
-WHISPER_API_KEY=local                           # server ไม่เช็ค
-WHISPER_API_BASE_URL=http://localhost:8000/v1   # หรือ host.docker.internal:8000/v1 ใน docker
+WHISPER_API_KEY=local                           # server does not check
+WHISPER_API_BASE_URL=http://localhost:8000/v1   # or host.docker.internal:8000/v1 in docker
 ```
 
-Model size แลกกับ RAM/quality (ตั้งใน `whisper-server/.env`):
+Model size trades off RAM vs. quality (set in `whisper-server/.env`):
 
 | Model | RAM | Speed (CPU) | Quality |
 |---|---|---|---|
-| `tiny` | ~0.5 GB | เร็วสุด | ใช้ได้ |
-| `small` | ~1 GB | สมดุล | ดี |
-| `medium` | ~2.5 GB | ช้า | ดีมาก |
-| `large-v3` | ~5 GB | ช้ามาก CPU | ดีสุด |
+| `tiny` | ~0.5 GB | Fastest | Usable |
+| `small` | ~1 GB | Balanced | Good |
+| `medium` | ~2.5 GB | Slow | Very good |
+| `large-v3` | ~5 GB | Very slow on CPU | Best |
 
-มี GPU → set `WHISPER_DEVICE=cuda` ใน `whisper-server/.env`
+Have a GPU? Set `WHISPER_DEVICE=cuda` in `whisper-server/.env`.
 
-### ปิด transcript ทิ้ง
+### Disable transcription
 
-เว้น `WHISPER_API_BASE_URL` ว่าง หรือไม่รัน whisper-server — recording ยังทำงาน แค่ไม่มี transcript/summary/search
+Leave `WHISPER_API_BASE_URL` empty or don't run whisper-server — recording still works, you just won't get transcript/summary/search.
 
 ---
 
 ## LLM post-processing (summary + auto-chapters)
 
-**Phase 2:** LLM call ย้ายไปอยู่ใน `whisper-server/` (Python) แล้ว — Node API ไม่เรียก LLM เอง การตั้ง LLM_* env ทั้งหมดอยู่ที่ `whisper-server/.env` ดู `whisper-server/README.md` สำหรับ provider ที่รองรับ (Ollama local/cloud, Typhoon, OpenAI-compatible)
+**Phase 2:** LLM calls have moved into `whisper-server/` (Python) — the Node API no longer calls the LLM itself. All `LLM_*` env settings live in `whisper-server/.env`. See `whisper-server/README.md` for supported providers (Ollama local/cloud, Typhoon, OpenAI-compatible).
 
-หลัง transcript เสร็จ Python จะเรียก LLM ต่อเพื่อ:
-1. **สรุป lecture** 2–3 ประโยค → แสดงข้างบน video
-2. **Auto-chapter** ถ้าครูไม่ได้ mark เอง → badge "AI-generated"
+Once the transcript is ready, Python calls the LLM to:
+1. **Summarize the lecture** in 2–3 sentences → displayed above the video
+2. **Auto-generate chapters** if the teacher didn't mark them → tagged with an "AI-generated" badge
 
-ปิด LLM ทิ้ง: เว้น `LLM_API_URL` ใน `whisper-server/.env` ว่าง — transcript ยังทำงาน แค่ไม่มี summary/chapters
+Disable LLM: leave `LLM_API_URL` empty in `whisper-server/.env` — transcripts still work, you just won't get summaries/chapters.
 
-## รันระบบในแต่ละวัน (ต้องเปิด 3 terminal)
+---
 
-เปิด Docker Desktop → `docker compose up -d` → แล้วเปิด 3 terminal:
+## Day-to-day run (3 terminals required)
+
+Open Docker Desktop → `docker compose up -d` → then open 3 terminals:
 
 **Terminal 1 — API**
 ```bash
@@ -172,34 +178,34 @@ pnpm dev
 # http://localhost:3000
 ```
 
-เปิด http://localhost:3000 แล้วคลิก persona เพื่อ login แบบ 1 click
+Open http://localhost:3000 and click a persona to log in with one click.
 
 ---
 
-## Demo personas (seed password: `demo1234` ทุกคน)
+## Demo personas (seed password: `demo1234` for all)
 
-| Email              | Role ใน ENG-101 | Note                        |
-|--------------------|-----------------|-----------------------------|
-| priya@acme.edu     | TEACHER (owner) | สอน ENG-101 + PM-305        |
-| marcus@acme.edu    | —               | สอน DS-220                  |
-| jae@corp.com       | STUDENT         | เรียน ENG-101 + DS-220      |
-| lena@corp.com      | STUDENT         | เรียน ENG-101 + PM-305      |
-| omar@corp.com      | STUDENT         | เรียน ENG-101               |
-| tess@corp.com      | STUDENT         | เรียน ENG-101               |
-
----
-
-## Demo flow แนะนำ
-
-1. Login เป็น **Priya** → `/dashboard` → คลิกเข้าคอร์ส ENG-101
-2. กด **Start recording** ที่ session ไหนก็ได้ → เลือก screen + อนุญาต mic
-3. พูดสัก 30 วินาที → กด **Stop recording** → status จะเป็น `processing…`
-4. รอ worker transcode เสร็จ (ปกติ 5–30 วิ สำหรับคลิปสั้นๆ) → status เป็น `ready`
-5. เปิด incognito window อีกอัน → login เป็น **Jae-won** → เปิด session เดียวกัน → กด play
+| Email              | Role in ENG-101 | Note                         |
+|--------------------|-----------------|------------------------------|
+| priya@acme.edu     | TEACHER (owner) | Teaches ENG-101 + PM-305     |
+| marcus@acme.edu    | —               | Teaches DS-220               |
+| jae@corp.com       | STUDENT         | Enrolled in ENG-101 + DS-220 |
+| lena@corp.com      | STUDENT         | Enrolled in ENG-101 + PM-305 |
+| omar@corp.com      | STUDENT         | Enrolled in ENG-101          |
+| tess@corp.com      | STUDENT         | Enrolled in ENG-101          |
 
 ---
 
-## เช็คว่า API ขึ้นจริง
+## Suggested demo flow
+
+1. Log in as **Priya** → `/dashboard` → click into the ENG-101 course
+2. Click **Start recording** on any session → pick a screen + allow mic
+3. Speak for ~30 seconds → click **Stop recording** → status becomes `processing…`
+4. Wait for the worker to transcode (typically 5–30 s for a short clip) → status becomes `ready`
+5. Open another incognito window → log in as **Jae-won** → open the same session → press play
+
+---
+
+## Verify the API is up
 
 ```bash
 curl http://localhost:4000/health
@@ -215,38 +221,38 @@ curl -X POST http://localhost:4000/api/v1/auth/demo/switch \
 
 ## Commands cheat sheet
 
-รันจาก root เลย (มี workspace script ใน root `package.json`):
+Run from the repo root (workspace scripts are defined in the root `package.json`):
 
-| Command                     | ทำอะไร                              |
-|-----------------------------|--------------------------------------|
-| `pnpm infra:up`             | Start Postgres/Redis/MinIO          |
-| `pnpm infra:down`           | Stop infra                           |
-| `pnpm infra:reset`          | Stop + ลบ volume + start ใหม่ (reset ทั้งหมด) |
-| `pnpm backend:dev`          | Start API server                     |
-| `pnpm backend:worker`       | Start FFmpeg worker                  |
-| `pnpm backend:seed`         | Re-seed demo data                    |
-| `pnpm backend:migrate`      | Run Prisma migrations                |
-| `pnpm backend:studio`       | เปิด Prisma Studio (DB viewer)       |
-| `pnpm frontend:dev`         | Start Next.js                        |
-| `pnpm setup`                | install + migrate + seed (one-shot)  |
+| Command                     | What it does                                   |
+|-----------------------------|------------------------------------------------|
+| `pnpm infra:up`             | Start Postgres / Redis / MinIO                 |
+| `pnpm infra:down`           | Stop infra                                     |
+| `pnpm infra:reset`          | Stop + drop volumes + start fresh (full reset) |
+| `pnpm backend:dev`          | Start API server                               |
+| `pnpm backend:worker`       | Start FFmpeg worker                            |
+| `pnpm backend:seed`         | Re-seed demo data                              |
+| `pnpm backend:migrate`      | Run Prisma migrations                          |
+| `pnpm backend:studio`       | Open Prisma Studio (DB viewer)                 |
+| `pnpm frontend:dev`         | Start Next.js                                  |
+| `pnpm setup`                | Install + migrate + seed (one-shot)            |
 
 ---
 
 ## Troubleshooting
 
-| ปัญหา                                                | วิธีแก้                                                                 |
-|------------------------------------------------------|--------------------------------------------------------------------------|
-| `docker: command not found`                          | เปิด Docker Desktop; `brew install --cask docker` ถ้ายังไม่มี           |
-| Prisma: `Can't reach database server at localhost:5432` | `docker compose ps` เช็ค postgres; `lsof -i :5432` เช็ค port ชนกันมั้ย |
-| Worker log `ffmpeg: not found`                       | `pnpm install` ใหม่ใน `backend/` — `ffmpeg-static` จะโหลด binary มาให้  |
-| MinIO bucket missing                                 | http://localhost:9001 → login → สร้าง bucket `olp-recordings` เอง        |
-| Recording UI ขอ permission ไม่ขึ้น                   | ใช้ Chrome/Edge; Safari ยังไม่ support ใน MVP (ดู Known limits ด้านล่าง) |
-| `CORS` error ที่ browser                             | เช็ค `CORS_ORIGIN=http://localhost:3000` ใน `backend/.env`              |
-| หลัง login แล้วเด้งกลับ `/login`                     | cookie ถูก block — เปิด browser ธรรมดา (ไม่ incognito เข้มๆ) หรือใช้ Chrome |
+| Problem                                              | Fix                                                                       |
+|------------------------------------------------------|---------------------------------------------------------------------------|
+| `docker: command not found`                          | Open Docker Desktop; `brew install --cask docker` if not installed       |
+| Prisma: `Can't reach database server at localhost:5432` | `docker compose ps` to check postgres; `lsof -i :5432` for port clashes |
+| Worker log `ffmpeg: not found`                       | `pnpm install` again in `backend/` — `ffmpeg-static` will download the binary |
+| MinIO bucket missing                                 | http://localhost:9001 → log in → create the `olp-recordings` bucket manually |
+| Recording UI doesn't prompt for permission           | Use Chrome / Edge; Safari is not supported in MVP (see Known limits)     |
+| `CORS` error in the browser                          | Check `CORS_ORIGIN=http://localhost:3000` in `backend/.env`              |
+| Bounced back to `/login` after logging in            | Cookie blocked — use a regular browser (not strict incognito) or Chrome  |
 
 ---
 
-## Deploy architecture (single-origin, ไม่มี cross-domain cookie)
+## Deploy architecture (single-origin, no cross-domain cookies)
 
 ```
                   ┌──────────────────────────────┐
@@ -264,41 +270,41 @@ Browser ───────►  │ Next.js (port 3000)          │
                   └──────────────────────────────┘
 ```
 
-Browser พูดคุยกับ Next.js origin อย่างเดียว:
-- **Cookies** = first-party → `SameSite=lax` ก็พอ ไม่ต้อง `SameSite=none; Secure` + CORS
-- **CORS** ไม่เกี่ยวเพราะ same-origin
-- **WebSocket** Next 14 self-hosted proxy WS upgrade ได้ ไม่ต้อง configure อะไร
+The browser only talks to the Next.js origin:
+- **Cookies** = first-party → `SameSite=lax` is enough; no `SameSite=none; Secure` + CORS dance needed
+- **CORS** is a non-issue because it's same-origin
+- **WebSocket** — self-hosted Next 14 proxies WS upgrades out of the box, no extra config
 
-Env ที่ต้องตั้ง:
+Required env vars:
 
-| Var | Scope | ใส่อะไร |
+| Var | Scope | Value |
 |---|---|---|
-| `BACKEND_URL` | Next server | internal URL ของ API เช่น `http://api:4000` ใน docker, หรือ `http://localhost:4000` ใน dev |
-| `NEXT_PUBLIC_API_BASE` | **build-time** | `/api/v1` (relative) — bake เข้า bundle |
-| `COOKIE_SECURE` | backend | `true` เมื่อ serve ผ่าน HTTPS |
+| `BACKEND_URL` | Next server | Internal URL of the API, e.g. `http://api:4000` in docker, or `http://localhost:4000` in dev |
+| `NEXT_PUBLIC_API_BASE` | **build-time** | `/api/v1` (relative) — baked into the bundle |
+| `COOKIE_SECURE` | backend | `true` when served over HTTPS |
 | `COOKIE_SAMESITE` | backend | `lax` (default) |
-| `JWT_SECRET` | backend | random string ยาวๆ |
+| `JWT_SECRET` | backend | Long random string |
 
-### Deploy ด้วย Docker Compose
+### Deploy with Docker Compose
 
 ```bash
-# 1. Build + start ทุก service (รวม api, worker, web + infra)
+# 1. Build + start every service (api, worker, web + infra)
 JWT_SECRET='your-long-prod-secret' \
 COOKIE_SECURE=true \
 docker compose --profile app up -d --build
 
-# 2. Migration ครั้งแรก
+# 2. First-time migration
 docker compose exec api npx prisma migrate deploy
 docker compose exec api npx tsx prisma/seed.ts   # optional
 
-# 3. เปิด http://localhost:3000 — ไม่ต้องเข้า :4000 จาก browser อีกเลย
+# 3. Open http://localhost:3000 — you never need to hit :4000 from the browser
 ```
 
-Prod tip: ลบบรรทัด `ports: ["4000:4000"]` ออกจาก `api` service ใน `docker-compose.yml` เพื่อปิด API ไม่ให้ expose ตรงสู่อินเทอร์เน็ต (browser จะวิ่งผ่าน Next.js proxy อย่างเดียว)
+Prod tip: remove the `ports: ["4000:4000"]` line from the `api` service in `docker-compose.yml` so the API isn't exposed directly to the internet (the browser only goes through the Next.js proxy).
 
-### Deploy หลัง reverse proxy (nginx/caddy)
+### Deploy behind a reverse proxy (nginx / caddy)
 
-ถ้าอยากมี reverse proxy เพิ่มด้านหน้า (terminate TLS, rate limit, etc.):
+If you want an additional reverse proxy in front (TLS termination, rate limiting, etc.):
 
 ```nginx
 # nginx.conf — one domain, both services
@@ -318,33 +324,39 @@ server {
 }
 ```
 
-Next.js เป็นคนทำ rewrite `/api` + `/socket.io` ต่อไปข้างหลัง — nginx ไม่ต้องแตะ API โดยตรง
+Next.js handles rewriting `/api` + `/socket.io` to the backend behind it — nginx never has to touch the API directly.
+
+---
 
 ## Tests
 
-Smoke tests (vitest + supertest) ที่ทดสอบ auth + course CRUD + permission:
+Smoke tests (vitest + supertest) covering auth + course CRUD + permission:
 
 ```bash
-docker compose up -d   # infra ต้องขึ้นก่อน
+docker compose up -d   # infra must be up first
 pnpm backend:seed       # seed data
 cd backend && pnpm test
 ```
 
-## Live classroom (ใหม่)
+---
 
-ตอนนี้ระบบรองรับ live classroom แล้ว:
-- ครูกด Start recording → record ไปด้วย + stream ไปที่นักเรียนพร้อมกัน (WebRTC mesh + Socket.io signaling)
-- นักเรียนเปิด session ขณะ LIVE → เห็นวิดีโอ + chat + ถามคำถาม real-time
-- นักเรียนกด **✋ Raise hand** → ครู Accept → browser ขอ cam+mic → นักเรียน publish กลับไปที่ครู
-- คำถามค้างไว้ถามทีหลังก็ได้ (archive questions ใน session page)
+## Live classroom (new)
 
-**Scale limit ของ MVP demo**: mesh WebRTC โอเคสำหรับ 1 teacher + ≤ 8 students; ถ้าห้องเรียนใหญ่กว่านี้ต้อง SFU (เช่น LiveKit/mediasoup) แทน
+The platform now supports live classrooms:
+- Teacher hits Start recording → recording happens **and** the stream is published to students simultaneously (WebRTC mesh + Socket.io signaling)
+- Students opening a session while it's LIVE → see the video + chat + ask questions in real time
+- Student presses **✋ Raise hand** → teacher Accepts → browser prompts for cam+mic → student publishes back to the teacher
+- Questions can also be left to ask later (archived questions on the session page)
 
-## Known MVP limits (จงใจ defer)
+**MVP scale limit:** WebRTC mesh is fine for 1 teacher + ≤ 8 students. Beyond that you need an SFU (e.g. LiveKit/mediasoup) instead.
 
-- **Chrome/Edge only** สำหรับ recording (WebM/VP8+Opus) — Safari คือ Phase 2
-- **Chapters บน playback page เป็น placeholder** — auto-chapter detection คือ Phase 2
-- **ไม่มี email notification** — worker log ว่า "would notify" เฉยๆ
-- **Live class mesh** — demo scale เท่านั้น; ต้อง SFU สำหรับ > 8 students
+---
 
-ดู [TECHNICAL-PLAN.md §1 & §12](./TECHNICAL-PLAN.md) สำหรับ exclusion list + risk table แบบเต็ม
+## Known MVP limits (intentionally deferred)
+
+- **Chrome/Edge only** for recording (WebM / VP8+Opus) — Safari is Phase 2
+- **Chapters on the playback page are placeholders** — auto-chapter detection is Phase 2
+- **No email notifications** — the worker just logs "would notify"
+- **Live class mesh** — demo-scale only; SFU required for > 8 students
+
+See [TECHNICAL-PLAN.md §1 & §12](./TECHNICAL-PLAN.md) for the full exclusion list + risk table.
